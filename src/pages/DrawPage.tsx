@@ -149,6 +149,28 @@ const DrawPage = () => {
       }
     }
 
+    function findCorners(pts: Point[]): Point[] {
+      if (pts.length < 10) return [];
+      const step = Math.max(1, Math.floor(pts.length / 40));
+      const angles: { idx: number; angle: number }[] = [];
+      for (let i = step; i < pts.length - step; i += step) {
+        const prev = pts[Math.max(0, i - step)], curr = pts[i], next = pts[Math.min(pts.length - 1, i + step)];
+        const a1 = Math.atan2(curr.y - prev.y, curr.x - prev.x);
+        const a2 = Math.atan2(next.y - curr.y, next.x - curr.x);
+        let diff = Math.abs(a2 - a1);
+        if (diff > Math.PI) diff = 2 * Math.PI - diff;
+        if (diff > 0.4) angles.push({ idx: i, angle: diff });
+      }
+      // Merge nearby corners
+      const merged: Point[] = [];
+      for (const a of angles) {
+        const last = merged[merged.length - 1];
+        if (last && Math.hypot(pts[a.idx].x - last.x, pts[a.idx].y - last.y) < 40) continue;
+        merged.push(pts[a.idx]);
+      }
+      return merged;
+    }
+
     function recognizeAndRefineShape(path: Drawing) {
       if (!path || path.points.length < 15) return;
       const pts = path.points;
