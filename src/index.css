@@ -114,3 +114,13 @@
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
 }
+
+@keyframes pulseRing {
+  0% { transform: scale(0.8); opacity: 1; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+
+@keyframes shineSweep {
+  0%, 70%, 100% { left: -100%; }
+  85% { left: 150%; }
+}
