@@ -2,8 +2,14 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 
 const COLORS = [
-  "#FF3B3B", "#FF6B6B", "#4ECDC4", "#FFE66D", "#9B5DE5",
-  "#00F5A0", "#FF9F1C", "#2BCBFF", "#F04299",
+  // Rainbow fun
+  "#FF3B3B", "#FF6B6B", "#FF9F1C", "#FFE66D",
+  "#00F5A0", "#4ECDC4", "#2BCBFF", "#9B5DE5",
+  "#F04299", "#FF85C0",
+  // Neon party
+  "#39FF14", "#FF073A", "#DFFF00", "#FF6EC7",
+  // Pastels
+  "#FFB3BA", "#BAFFC9", "#BAE1FF", "#E8BAFF",
 ];
 
 const ERASER_RADIUS = 45;
@@ -466,19 +472,34 @@ const DrawPage = () => {
         </div>
       )}
 
-      {/* Color Picker */}
-      <div className="fixed left-4 top-1/2 -translate-y-1/2 flex flex-col gap-2 z-50 rounded-[40px] p-3 backdrop-blur-xl" style={{ transform: "translateY(-50%) scaleX(-1)", background: "rgba(20,20,30,0.75)", border: "1px solid rgba(255,255,255,0.08)" }}>
-        {COLORS.map((c) => (
+      {/* Color Picker - scrollable rainbow palette */}
+      <div className="fixed left-3 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 z-50 rounded-[40px] p-2.5 backdrop-blur-xl max-h-[85vh] overflow-y-auto scrollbar-hide" style={{ transform: "translateY(-50%) scaleX(-1)", background: "rgba(20,20,30,0.8)", border: "2px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.4)" }}>
+        <div className="text-center text-lg mb-1" style={{ transform: "scaleX(-1)" }}>🎨</div>
+        {COLORS.map((c, i) => (
           <button key={c} onClick={() => setCurrentColor(c)}
-            className="w-10 h-10 rounded-full border-[3px] cursor-pointer transition-all"
+            className="w-9 h-9 rounded-full border-[3px] cursor-pointer transition-all duration-200"
             style={{
               background: c,
               borderColor: currentColor === c ? "#fff" : "transparent",
-              transform: currentColor === c ? "scale(1.2)" : "scale(1)",
-              boxShadow: currentColor === c ? `0 0 22px ${c}, 0 0 6px #fff` : `0 2px 6px rgba(0,0,0,0.3)`,
+              transform: currentColor === c ? "scale(1.25)" : "scale(1)",
+              boxShadow: currentColor === c ? `0 0 20px ${c}, 0 0 8px #fff` : `0 2px 6px rgba(0,0,0,0.3)`,
+              animation: currentColor === c ? "pulseGlow 1.5s ease-in-out infinite" : "none",
             }}
           />
         ))}
+        {/* Rainbow cycle button */}
+        <button
+          onClick={() => {
+            const idx = COLORS.indexOf(currentColor);
+            setCurrentColor(COLORS[(idx + 1) % COLORS.length]);
+          }}
+          className="w-9 h-9 rounded-full cursor-pointer transition-all duration-200 border-2 border-white/20 hover:scale-110 active:scale-90 mt-1"
+          style={{
+            background: "conic-gradient(#FF3B3B, #FFE66D, #00F5A0, #2BCBFF, #9B5DE5, #F04299, #FF3B3B)",
+            animation: "spin 4s linear infinite",
+          }}
+          title="Next color!"
+        />
       </div>
 
       {/* Toolbar */}
