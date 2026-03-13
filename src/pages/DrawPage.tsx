@@ -149,6 +149,28 @@ const DrawPage = () => {
       }
     }
 
+    function findCorners(pts: Point[]): Point[] {
+      if (pts.length < 10) return [];
+      const step = Math.max(1, Math.floor(pts.length / 40));
+      const angles: { idx: number; angle: number }[] = [];
+      for (let i = step; i < pts.length - step; i += step) {
+        const prev = pts[Math.max(0, i - step)], curr = pts[i], next = pts[Math.min(pts.length - 1, i + step)];
+        const a1 = Math.atan2(curr.y - prev.y, curr.x - prev.x);
+        const a2 = Math.atan2(next.y - curr.y, next.x - curr.x);
+        let diff = Math.abs(a2 - a1);
+        if (diff > Math.PI) diff = 2 * Math.PI - diff;
+        if (diff > 0.4) angles.push({ idx: i, angle: diff });
+      }
+      // Merge nearby corners
+      const merged: Point[] = [];
+      for (const a of angles) {
+        const last = merged[merged.length - 1];
+        if (last && Math.hypot(pts[a.idx].x - last.x, pts[a.idx].y - last.y) < 40) continue;
+        merged.push(pts[a.idx]);
+      }
+      return merged;
+    }
+
     function recognizeAndRefineShape(path: Drawing) {
       if (!path || path.points.length < 15) return;
       const pts = path.points;
@@ -173,6 +195,41 @@ const DrawPage = () => {
             path.points = newPts; showGesture("✨ Perfect Circle!"); return;
           }
         }
+        // Check for triangle: find corners by analyzing angle changes
+        const corners = findCorners(pts);
+        if (corners.length === 3) {
+          const [a, b, c] = corners;
+          path.points = [a, b, c, a];
+          path.isShape = true; showGesture("🔺 Perfect Triangle!"); return;
+        }
+
+        // Check for diamond (4 corners with roughly equal sides)
+        if (corners.length === 4) {
+          const [a, b, c, d] = corners;
+          const sides = [
+            Math.hypot(b.x-a.x, b.y-a.y), Math.hypot(c.x-b.x, c.y-b.y),
+            Math.hypot(d.x-c.x, d.y-c.y), Math.hypot(a.x-d.x, a.y-d.y)
+          ];
+          const avgSide = sides.reduce((s,v)=>s+v,0)/4;
+          const sideVar = sides.every(s => Math.abs(s - avgSide) < avgSide * 0.35);
+          if (sideVar) {
+            // Check if it's rotated (diamond) vs axis-aligned (square)
+            const topIdx = [a,b,c,d].reduce((mi, p, i, arr) => p.y < arr[mi].y ? i : mi, 0);
+            const sorted = [...[a,b,c,d].slice(topIdx), ...[a,b,c,d].slice(0, topIdx)];
+            const isAxisAligned = Math.abs(sorted[0].x - cx) < width * 0.15;
+            if (isAxisAligned) {
+              // Diamond shape
+              const r = avgSide / Math.sqrt(2);
+              path.points = [
+                { x: cx, y: cy - r }, { x: cx + r, y: cy },
+                { x: cx, y: cy + r }, { x: cx - r, y: cy },
+                { x: cx, y: cy - r }
+              ];
+              path.isShape = true; showGesture("💎 Perfect Diamond!"); return;
+            }
+          }
+        }
+
         let edgeDev = 0;
         for (const p of pts) edgeDev += Math.min(Math.abs(p.x - minX), Math.abs(p.x - maxX), Math.abs(p.y - minY), Math.abs(p.y - maxY));
         if (edgeDev / pts.length < Math.min(width, height) * 0.15) {
