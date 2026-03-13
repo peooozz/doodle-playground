@@ -2,8 +2,14 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 
 const COLORS = [
-  "#FF3B3B", "#FF6B6B", "#4ECDC4", "#FFE66D", "#9B5DE5",
-  "#00F5A0", "#FF9F1C", "#2BCBFF", "#F04299",
+  // Rainbow fun
+  "#FF3B3B", "#FF6B6B", "#FF9F1C", "#FFE66D",
+  "#00F5A0", "#4ECDC4", "#2BCBFF", "#9B5DE5",
+  "#F04299", "#FF85C0",
+  // Neon party
+  "#39FF14", "#FF073A", "#DFFF00", "#FF6EC7",
+  // Pastels
+  "#FFB3BA", "#BAFFC9", "#BAE1FF", "#E8BAFF",
 ];
 
 const ERASER_RADIUS = 45;
