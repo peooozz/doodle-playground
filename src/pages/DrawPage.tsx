@@ -13,7 +13,63 @@ const COLORS = [
 ];
 
 const ERASER_RADIUS = 45;
-const BASE_SMOOTHING = 0.25;
+
+// --- 1€ (One Euro) Adaptive Filter ---
+// Provides low jitter when hand is still, high responsiveness when moving fast.
+class OneEuroFilter {
+  private minCutoff: number;
+  private beta: number;
+  private dCutoff: number;
+  private xPrev: number | null = null;
+  private dxPrev: number = 0;
+  private tPrev: number | null = null;
+
+  constructor(minCutoff = 1.0, beta = 0.007, dCutoff = 1.0) {
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+    this.dCutoff = dCutoff;
+  }
+
+  private smoothingFactor(cutoff: number, dt: number): number {
+    const r = 2 * Math.PI * cutoff * dt;
+    return r / (r + 1);
+  }
+
+  filter(x: number, timestamp: number): number {
+    if (this.xPrev === null || this.tPrev === null) {
+      this.xPrev = x;
+      this.tPrev = timestamp;
+      return x;
+    }
+    const dt = Math.max((timestamp - this.tPrev) / 1000, 0.001); // seconds
+    this.tPrev = timestamp;
+
+    // Estimate derivative (velocity)
+    const dx = (x - this.xPrev) / dt;
+    const aD = this.smoothingFactor(this.dCutoff, dt);
+    const dxSmoothed = aD * dx + (1 - aD) * this.dxPrev;
+    this.dxPrev = dxSmoothed;
+
+    // Adaptive cutoff based on speed
+    const cutoff = this.minCutoff + this.beta * Math.abs(dxSmoothed);
+    const a = this.smoothingFactor(cutoff, dt);
+    const xFiltered = a * x + (1 - a) * this.xPrev;
+    this.xPrev = xFiltered;
+    return xFiltered;
+  }
+
+  reset() {
+    this.xPrev = null;
+    this.dxPrev = 0;
+    this.tPrev = null;
+  }
+}
+
+// --- Position history buffer for outlier rejection ---
+const HISTORY_SIZE = 5;
+const OUTLIER_MULTIPLIER = 3.5; // reject jumps > 3.5x recent avg velocity
+const MIN_POINT_DISTANCE = 4; // minimum px between drawn points (deadzone)
+const HOLD_FRAMES_THRESHOLD = 15; // frames before shape snap triggers
 
 interface Point { x: number; y: number; }
 interface Drawing {
@@ -39,7 +95,13 @@ const DrawPage = () => {
   const selectedDrawingRef = useRef<Drawing | null>(null);
   const isDraggingRef = useRef(false);
   const lastFingerPosRef = useRef({ x: 0, y: 0 });
-  const smoothedPosRef = useRef<{ x: number | null; y: number | null }>({ x: null, y: null });
+  const filterXRef = useRef<OneEuroFilter>(new OneEuroFilter(1.0, 0.007, 1.0));
+  const filterYRef = useRef<OneEuroFilter>(new OneEuroFilter(1.0, 0.007, 1.0));
+  const posHistoryRef = useRef<{ x: number; y: number; t: number }[]>([]);
+  const eraserFilterXRef = useRef<OneEuroFilter>(new OneEuroFilter(1.5, 0.005, 1.0));
+  const eraserFilterYRef = useRef<OneEuroFilter>(new OneEuroFilter(1.5, 0.005, 1.0));
+  const pinchFilterXRef = useRef<OneEuroFilter>(new OneEuroFilter(1.5, 0.005, 1.0));
+  const pinchFilterYRef = useRef<OneEuroFilter>(new OneEuroFilter(1.5, 0.005, 1.0));
   const animTickRef = useRef(0);
   const currentColorRef = useRef(currentColor);
   const isDarkThemeRef = useRef(isDarkTheme);
@@ -54,6 +116,30 @@ const DrawPage = () => {
     if (gestureTimerRef.current) clearTimeout(gestureTimerRef.current);
     gestureTimerRef.current = setTimeout(() => setGestureVisible(false), 1200);
   }, []);
+
+  const downloadDoodle = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    // Create a temporary canvas to save the image (without UI)
+    const tempCanvas = document.createElement("canvas");
+    tempCanvas.width = canvas.width;
+    tempCanvas.height = canvas.height;
+    const tempCtx = tempCanvas.getContext("2d")!;
+
+    // Mirror back so the saved image is readable/correctly oriented
+    tempCtx.save();
+    tempCtx.translate(tempCanvas.width, 0);
+    tempCtx.scale(-1, 1);
+    tempCtx.drawImage(canvas, 0, 0);
+    tempCtx.restore();
+
+    const link = document.createElement("a");
+    link.download = `my-doodle-${Date.now()}.png`;
+    link.href = tempCanvas.toDataURL("image/png");
+    link.click();
+    showGesture("📸 Saved!");
+  }, [showGesture]);
 
   const clearAll = useCallback(() => {
     drawingsRef.current = [];
@@ -165,16 +251,37 @@ const DrawPage = () => {
         const a2 = Math.atan2(next.y - curr.y, next.x - curr.x);
         let diff = Math.abs(a2 - a1);
         if (diff > Math.PI) diff = 2 * Math.PI - diff;
-        if (diff > 0.4) angles.push({ idx: i, angle: diff });
+        if (diff > 0.35) angles.push({ idx: i, angle: diff });
       }
-      // Merge nearby corners
+      // Merge nearby corners (larger merge radius for noisy input)
       const merged: Point[] = [];
       for (const a of angles) {
         const last = merged[merged.length - 1];
-        if (last && Math.hypot(pts[a.idx].x - last.x, pts[a.idx].y - last.y) < 40) continue;
+        if (last && Math.hypot(pts[a.idx].x - last.x, pts[a.idx].y - last.y) < 50) continue;
         merged.push(pts[a.idx]);
       }
       return merged;
+    }
+
+    // Outlier rejection: checks if a new position is an unreasonable jump
+    function isOutlier(nx: number, ny: number, now: number): boolean {
+      const hist = posHistoryRef.current;
+      if (hist.length < 2) return false;
+      // compute average velocity over recent history
+      let totalDist = 0;
+      for (let i = 1; i < hist.length; i++) {
+        totalDist += Math.hypot(hist[i].x - hist[i - 1].x, hist[i].y - hist[i - 1].y);
+      }
+      const avgStep = totalDist / (hist.length - 1);
+      const last = hist[hist.length - 1];
+      const jump = Math.hypot(nx - last.x, ny - last.y);
+      return jump > Math.max(avgStep * OUTLIER_MULTIPLIER, 60);
+    }
+
+    function pushHistory(x: number, y: number, t: number) {
+      const hist = posHistoryRef.current;
+      hist.push({ x, y, t });
+      if (hist.length > HISTORY_SIZE) hist.shift();
     }
 
     function recognizeAndRefineShape(path: Drawing) {
@@ -192,10 +299,10 @@ const DrawPage = () => {
       if (isClosed) {
         const avgRadius = (width + height) / 4;
         const aspectRatio = Math.max(width, height) / Math.min(width, height);
-        if (aspectRatio < 1.4) {
+        if (aspectRatio < 1.35) {
           let totalDeviation = 0;
           for (const p of pts) totalDeviation += Math.abs(Math.hypot(p.x - cx, p.y - cy) - avgRadius);
-          if (totalDeviation / pts.length < avgRadius * 0.25) {
+          if (totalDeviation / pts.length < avgRadius * 0.22) {
             const newPts: Point[] = [];
             for (let i = 0; i <= 40; i++) { const angle = (i / 40) * Math.PI * 2; newPts.push({ x: cx + Math.cos(angle) * avgRadius, y: cy + Math.sin(angle) * avgRadius }); }
             path.points = newPts; showGesture("✨ Perfect Circle!"); return;
@@ -238,7 +345,7 @@ const DrawPage = () => {
 
         let edgeDev = 0;
         for (const p of pts) edgeDev += Math.min(Math.abs(p.x - minX), Math.abs(p.x - maxX), Math.abs(p.y - minY), Math.abs(p.y - maxY));
-        if (edgeDev / pts.length < Math.min(width, height) * 0.15) {
+        if (edgeDev / pts.length < Math.min(width, height) * 0.13) {
           const isSquare = Math.max(width, height) / Math.min(width, height) < 1.35;
           const sizeX = isSquare ? Math.max(width, height) : width;
           const sizeY = isSquare ? Math.max(width, height) : height;
@@ -250,7 +357,7 @@ const DrawPage = () => {
         if (lineLen > 60) {
           let totalDev = 0;
           for (const p of pts) totalDev += Math.abs((last.y - first.y) * p.x - (last.x - first.x) * p.y + last.x * first.y - last.y * first.x) / lineLen;
-          if (totalDev / pts.length < 25) { path.points = [first, last]; path.isShape = true; showGesture("📏 Straight Line!"); }
+          if (totalDev / pts.length < 20) { path.points = [first, last]; path.isShape = true; showGesture("📏 Straight Line!"); }
         }
       }
     }
@@ -374,20 +481,30 @@ const DrawPage = () => {
         const tx = hand[4].x * canvas!.width, ty = hand[4].y * canvas!.height;
 
         if (isThreeFingersUp(hand)) {
-          const ex = (ix + mx + rx) / 3, ey = (iy + my + ry) / 3;
+          const rawEx = (ix + mx + rx) / 3, rawEy = (iy + my + ry) / 3;
+          const now = performance.now();
+          const ex = eraserFilterXRef.current.filter(rawEx, now);
+          const ey = eraserFilterYRef.current.filter(rawEy, now);
           eraseAt(ex, ey); drawEraserCursor(ex, ey);
           currentPathRef.current = null; isDraggingRef.current = false; selectedDrawingRef.current = null;
         } else if (isIndexAndMiddleUp(hand)) {
           drawPointerCursor((ix + mx) / 2, (iy + my) / 2);
           currentPathRef.current = null; isDraggingRef.current = false; selectedDrawingRef.current = null;
         } else if (isStrictlyIndexUp(hand) && !isPinching(hand)) {
-          const sp = smoothedPosRef.current;
-          if (sp.x === null) { sp.x = ix; sp.y = iy; } else {
-            const dist = Math.hypot(ix - sp.x, iy - sp.y!);
-            const factor = Math.min(1.0, BASE_SMOOTHING + dist * 0.05);
-            sp.x += (ix - sp.x) * factor; sp.y! += (iy - sp.y!) * factor;
+          // --- 1€ filter + outlier rejection ---
+          const now = performance.now();
+          if (!isOutlier(ix, iy, now)) {
+            pushHistory(ix, iy, now);
+            ix = filterXRef.current.filter(ix, now);
+            iy = filterYRef.current.filter(iy, now);
+          } else {
+            // Use last known good position
+            const hist = posHistoryRef.current;
+            if (hist.length > 0) {
+              ix = hist[hist.length - 1].x;
+              iy = hist[hist.length - 1].y;
+            }
           }
-          ix = sp.x; iy = sp.y!;
 
           if (!currentPathRef.current) {
             currentPathRef.current = { points: [], color: currentColorRef.current, id: Date.now(), holdFrames: 0, isShape: false };
@@ -396,13 +513,18 @@ const DrawPage = () => {
           const cp = currentPathRef.current;
           const lastPt = cp.points[cp.points.length - 1];
           const distToLast = lastPt ? Math.hypot(lastPt.x - ix, lastPt.y - iy) : Infinity;
-          if (distToLast < 8) { cp.holdFrames++; if (cp.holdFrames > 18 && !cp.isShape) recognizeAndRefineShape(cp); }
+
+          if (distToLast < 8) { cp.holdFrames++; if (cp.holdFrames > HOLD_FRAMES_THRESHOLD && !cp.isShape) recognizeAndRefineShape(cp); }
           else cp.holdFrames = 0;
-          if (!cp.isShape && (!lastPt || distToLast > 2.5)) cp.points.push({ x: ix, y: iy });
+          if (!cp.isShape && (!lastPt || distToLast > MIN_POINT_DISTANCE)) cp.points.push({ x: ix, y: iy });
           isDraggingRef.current = false; selectedDrawingRef.current = null;
         } else if (isPinching(hand)) {
-          smoothedPosRef.current = { x: null, y: null };
-          const midX = (ix + tx) / 2, midY = (iy + ty) / 2;
+          filterXRef.current.reset(); filterYRef.current.reset();
+          posHistoryRef.current = [];
+          const now = performance.now();
+          const rawMidX = (ix + tx) / 2, rawMidY = (iy + ty) / 2;
+          const midX = pinchFilterXRef.current.filter(rawMidX, now);
+          const midY = pinchFilterYRef.current.filter(rawMidY, now);
           if (!isDraggingRef.current) {
             selectedDrawingRef.current = findDrawingAt(midX, midY);
             if (selectedDrawingRef.current) { isDraggingRef.current = true; lastFingerPosRef.current = { x: midX, y: midY }; }
@@ -415,12 +537,18 @@ const DrawPage = () => {
           currentPathRef.current = null;
         } else {
           currentPathRef.current = null; isDraggingRef.current = false; selectedDrawingRef.current = null;
-          smoothedPosRef.current = { x: null, y: null };
+          filterXRef.current.reset(); filterYRef.current.reset();
+          eraserFilterXRef.current.reset(); eraserFilterYRef.current.reset();
+          pinchFilterXRef.current.reset(); pinchFilterYRef.current.reset();
+          posHistoryRef.current = [];
         }
         drawNeonSkeleton(hand);
       } else {
         currentPathRef.current = null; isDraggingRef.current = false; selectedDrawingRef.current = null;
-        smoothedPosRef.current = { x: null, y: null };
+        filterXRef.current.reset(); filterYRef.current.reset();
+        eraserFilterXRef.current.reset(); eraserFilterYRef.current.reset();
+        pinchFilterXRef.current.reset(); pinchFilterYRef.current.reset();
+        posHistoryRef.current = [];
       }
       ctx.restore();
     }
@@ -437,7 +565,7 @@ const DrawPage = () => {
       script2.onload = () => {
         const w = window as any;
         const hands = new w.Hands({ locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
-        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.8, minTrackingConfidence: 0.75 });
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.8, minTrackingConfidence: 0.85 });
         hands.onResults(onResults);
         const camera = new w.Camera(video, {
           onFrame: async () => { await hands.send({ image: video }); },
@@ -449,7 +577,83 @@ const DrawPage = () => {
     };
     document.head.appendChild(script1);
 
-    return () => { window.removeEventListener("resize", setupCanvas); };
+    // --- Mouse support for simulation/debug ---
+    const handleMouseDown = (e: MouseEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = (e.clientX - rect.left) / canvas.width;
+      const y = (e.clientY - rect.top) / canvas.height;
+      // Invert x because canvas is scaleX(-1)
+      const invX = 1 - x;
+      
+      const simulateHand = (isErase = false, isPinch = false) => {
+        const hand = Array(21).fill(0).map(() => ({ x: invX, y: y }));
+        // Tip of index
+        hand[8] = { x: invX, y: y };
+        // Joint of index
+        hand[6] = { x: invX, y: y + 0.1 };
+        
+        if (isErase) {
+          // Tip of middle
+          hand[12] = { x: invX + 0.02, y: y };
+          hand[10] = { x: invX + 0.02, y: y + 0.1 };
+          // Tip of ring
+          hand[16] = { x: invX + 0.04, y: y };
+          hand[14] = { x: invX + 0.04, y: y + 0.1 };
+        } else if (isPinch) {
+          // Thumb tip close to index tip
+          hand[4] = { x: invX + 0.01, y: y + 0.01 };
+        } else {
+          // Other fingers down
+          hand[12] = { x: invX + 0.02, y: y + 0.2 };
+          hand[10] = { x: invX + 0.02, y: y + 0.15 };
+        }
+        onResults({ multiHandLandmarks: [hand] });
+      };
+
+      const handleMove = (me: MouseEvent) => {
+        const mRect = canvas.getBoundingClientRect();
+        const mx = (me.clientX - mRect.left) / canvas.width;
+        const my = (me.clientY - mRect.top) / canvas.height;
+        const mInvX = 1 - mx;
+        
+        const hand = Array(21).fill(0).map(() => ({ x: mInvX, y: my }));
+        hand[8] = { x: mInvX, y: my };
+        hand[6] = { x: mInvX, y: my + 0.1 };
+        
+        if (me.buttons === 2 || (me.buttons === 1 && me.ctrlKey)) {
+          // Erase (Right click or Ctrl+Click)
+          hand[12] = { x: mInvX + 0.02, y: my };
+          hand[10] = { x: mInvX + 0.02, y: my + 0.1 };
+          hand[16] = { x: mInvX + 0.04, y: my };
+          hand[14] = { x: mInvX + 0.04, y: my + 0.1 };
+        } else if (me.shiftKey) {
+          // Pinch
+          hand[4] = { x: mInvX + 0.01, y: my + 0.01 };
+        } else {
+          hand[12] = { x: mInvX + 0.02, y: my + 0.2 };
+          hand[10] = { x: mInvX + 0.02, y: my + 0.15 };
+        }
+        onResults({ multiHandLandmarks: [hand] });
+      };
+
+      const handleUp = () => {
+        window.removeEventListener("mousemove", handleMove);
+        window.removeEventListener("mouseup", handleUp);
+        onResults({ multiHandLandmarks: [] });
+      };
+
+      window.addEventListener("mousemove", handleMove);
+      window.addEventListener("mouseup", handleUp);
+      simulateHand(e.buttons === 2, e.shiftKey);
+    };
+
+    canvas.addEventListener("mousedown", handleMouseDown);
+    canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+    return () => { 
+      window.removeEventListener("resize", setupCanvas); 
+      canvas.removeEventListener("mousedown", handleMouseDown);
+    };
   }, [showGesture]);
 
   return (
@@ -506,6 +710,7 @@ const DrawPage = () => {
       <div className="fixed top-4 right-4 flex gap-2 z-50" style={{ transform: "scaleX(-1)" }}>
         {[
           { id: "theme", emoji: isDarkTheme ? "🌙" : "☀️", action: () => setIsDarkTheme(!isDarkTheme) },
+          { id: "download", emoji: "💾", action: downloadDoodle },
           { id: "clear", emoji: "🗑️", action: clearAll },
           { id: "undo", emoji: "↩️", action: undo },
           { id: "home", emoji: "🏠", action: () => navigate("/") },
