@@ -88,7 +88,6 @@ interface Drawing {
   brushMode: BrushMode;
   strokeWidth: number;
   filled: boolean;
-  // For rainbow mode, store color per segment
   segmentColors?: string[];
 }
 
@@ -104,6 +103,8 @@ const DrawPage = () => {
   const [strokeWidth, setStrokeWidth] = useState(6);
   const [fillMode, setFillMode] = useState(false);
   const [showBrushPanel, setShowBrushPanel] = useState(false);
+  const [darkMode, setDarkMode] = useState(true);
+  const [fillBucketActive, setFillBucketActive] = useState(false);
 
   const drawingsRef = useRef<Drawing[]>([]);
   const currentPathRef = useRef<Drawing | null>(null);
@@ -124,11 +125,15 @@ const DrawPage = () => {
   const fillModeRef = useRef(fillMode);
   const rainbowIndexRef = useRef(0);
   const gestureTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const darkModeRef = useRef(darkMode);
+  const fillBucketActiveRef = useRef(fillBucketActive);
 
   useEffect(() => { currentColorRef.current = currentColor; }, [currentColor]);
   useEffect(() => { brushModeRef.current = brushMode; }, [brushMode]);
   useEffect(() => { strokeWidthRef.current = strokeWidth; }, [strokeWidth]);
   useEffect(() => { fillModeRef.current = fillMode; }, [fillMode]);
+  useEffect(() => { darkModeRef.current = darkMode; }, [darkMode]);
+  useEffect(() => { fillBucketActiveRef.current = fillBucketActive; }, [fillBucketActive]);
 
   const showGesture = useCallback((text: string) => {
     setGestureText(text);
@@ -170,6 +175,40 @@ const DrawPage = () => {
   }, [showGesture]);
 
   const activeColors = brushMode === "classic" ? CLASSIC_COLORS : GLITTER_COLORS;
+
+  // Fill bucket: click on a shape to fill it with current color
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const handleFillClick = (e: MouseEvent) => {
+      if (!fillBucketActiveRef.current) return;
+      const rect = canvas.getBoundingClientRect();
+      // Account for scaleX(-1)
+      const clickX = canvas.width - ((e.clientX - rect.left) / rect.width * canvas.width);
+      const clickY = (e.clientY - rect.top) / rect.height * canvas.height;
+      
+      // Find shape at click position
+      for (let i = drawingsRef.current.length - 1; i >= 0; i--) {
+        const d = drawingsRef.current[i];
+        if (!d.isShape || d.points.length < 3) continue;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const p of d.points) {
+          if (p.x < minX) minX = p.x;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.y > maxY) maxY = p.y;
+        }
+        if (clickX >= minX - 20 && clickX <= maxX + 20 && clickY >= minY - 20 && clickY <= maxY + 20) {
+          d.filled = true;
+          d.color = currentColorRef.current;
+          showGesture("🪣 Filled!");
+          break;
+        }
+      }
+    };
+    canvas.addEventListener("click", handleFillClick);
+    return () => canvas.removeEventListener("click", handleFillClick);
+  }, [showGesture]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -306,21 +345,20 @@ const DrawPage = () => {
       const width = maxX - minX, height = maxY - minY, diag = Math.hypot(width, height);
       if (diag < 40) return;
       const closureDist = Math.hypot(first.x - last.x, first.y - last.y);
-      const isClosed = closureDist < diag * 0.3;
+      const isClosed = closureDist < diag * 0.35;
       const cx = minX + width / 2, cy = minY + height / 2;
 
       if (isClosed) {
         const avgRadius = (width + height) / 4;
         const aspectRatio = Math.max(width, height) / Math.min(width, height);
-        if (aspectRatio < 1.35) {
+        if (aspectRatio < 1.4) {
           let totalDeviation = 0;
           for (const p of pts) totalDeviation += Math.abs(Math.hypot(p.x - cx, p.y - cy) - avgRadius);
-          if (totalDeviation / pts.length < avgRadius * 0.22) {
+          if (totalDeviation / pts.length < avgRadius * 0.25) {
             const newPts: Point[] = [];
             for (let i = 0; i <= 40; i++) { const angle = (i / 40) * Math.PI * 2; newPts.push({ x: cx + Math.cos(angle) * avgRadius, y: cy + Math.sin(angle) * avgRadius }); }
             path.points = newPts; path.isShape = true;
-            if (fillModeRef.current) path.filled = true;
-            showGesture("✨ Perfect Circle!"); return;
+            showGesture("⭕ Perfect Circle!"); return;
           }
         }
         const corners = findCorners(pts);
@@ -328,7 +366,6 @@ const DrawPage = () => {
           const [a, b, c] = corners;
           path.points = [a, b, c, a];
           path.isShape = true;
-          if (fillModeRef.current) path.filled = true;
           showGesture("🔺 Perfect Triangle!"); return;
         }
         if (corners.length === 4) {
@@ -351,7 +388,6 @@ const DrawPage = () => {
                 { x: cx, y: cy - r }
               ];
               path.isShape = true;
-              if (fillModeRef.current) path.filled = true;
               showGesture("💎 Perfect Diamond!"); return;
             }
           }
@@ -359,13 +395,12 @@ const DrawPage = () => {
 
         let edgeDev = 0;
         for (const p of pts) edgeDev += Math.min(Math.abs(p.x - minX), Math.abs(p.x - maxX), Math.abs(p.y - minY), Math.abs(p.y - maxY));
-        if (edgeDev / pts.length < Math.min(width, height) * 0.13) {
+        if (edgeDev / pts.length < Math.min(width, height) * 0.15) {
           const isSquare = Math.max(width, height) / Math.min(width, height) < 1.35;
           const sizeX = isSquare ? Math.max(width, height) : width;
           const sizeY = isSquare ? Math.max(width, height) : height;
           path.points = [{ x: cx - sizeX / 2, y: cy - sizeY / 2 }, { x: cx + sizeX / 2, y: cy - sizeY / 2 }, { x: cx + sizeX / 2, y: cy + sizeY / 2 }, { x: cx - sizeX / 2, y: cy + sizeY / 2 }, { x: cx - sizeX / 2, y: cy - sizeY / 2 }];
           path.isShape = true;
-          if (fillModeRef.current) path.filled = true;
           showGesture(isSquare ? "🟩 Perfect Square!" : "🔲 Perfect Rectangle!"); return;
         }
       } else {
@@ -380,19 +415,24 @@ const DrawPage = () => {
 
     function drawPointerCursor(x: number, y: number) {
       ctx.save();
+      const isDark = darkModeRef.current;
       ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(255, 255, 255, 0.8)"; ctx.fill();
-      ctx.strokeStyle = "rgba(0, 0, 0, 0.3)"; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.fillStyle = isDark ? "rgba(255, 255, 255, 0.8)" : "rgba(0, 0, 0, 0.8)";
+      ctx.fill();
+      ctx.strokeStyle = isDark ? "rgba(0, 0, 0, 0.3)" : "rgba(255, 255, 255, 0.3)";
+      ctx.lineWidth = 1.5; ctx.stroke();
       ctx.restore();
     }
 
     function drawEraserCursor(x: number, y: number) {
       ctx.save();
+      const isDark = darkModeRef.current;
       ctx.beginPath(); ctx.arc(x, y, ERASER_RADIUS, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(255,255,255,0.6)";
+      ctx.strokeStyle = isDark ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)";
       ctx.lineWidth = 2.5; ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
       ctx.beginPath(); ctx.arc(x, y, ERASER_RADIUS, 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(255,100,100,0.12)"; ctx.fill();
+      ctx.fillStyle = isDark ? "rgba(255,100,100,0.12)" : "rgba(255,100,100,0.15)";
+      ctx.fill();
       ctx.restore();
     }
 
@@ -407,13 +447,15 @@ const DrawPage = () => {
         ctx.lineTo(d.points[i].x, d.points[i].y);
       }
       ctx.closePath();
-      ctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},0.35)`;
+      ctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},0.45)`;
       ctx.fill();
       ctx.restore();
     }
 
     function drawStoredPaths() {
       ctx.lineCap = "round"; ctx.lineJoin = "round";
+      const time = animTickRef.current * 0.05;
+      
       drawingsRef.current.forEach((d, dIdx) => {
         if (d.points.length < 2) return;
         const isSelected = selectedDrawingRef.current && selectedDrawingRef.current.id === d.id;
@@ -428,7 +470,7 @@ const DrawPage = () => {
         }
 
         if (d.brushMode === "rainbow" && d.segmentColors && d.segmentColors.length > 0) {
-          // Rainbow mode: draw each segment with its own color
+          // Rainbow mode: glitter style with color cycling
           for (let i = 1; i < d.points.length; i++) {
             const segColor = d.segmentColors[Math.min(i - 1, d.segmentColors.length - 1)] || color;
             const segRgb = hexToRgb(segColor);
@@ -436,24 +478,48 @@ const DrawPage = () => {
             ctx.moveTo(d.points[i - 1].x, d.points[i - 1].y);
             ctx.lineTo(d.points[i].x, d.points[i].y);
 
-            // Outer glow
-            ctx.shadowBlur = sw * 2;
+            // Glitter-style neon glow
+            ctx.shadowBlur = sw * 3;
             ctx.shadowColor = segColor;
-            ctx.strokeStyle = `rgba(${segRgb.r},${segRgb.g},${segRgb.b},0.5)`;
-            ctx.lineWidth = sw + 4;
+            ctx.strokeStyle = `rgba(${segRgb.r},${segRgb.g},${segRgb.b},0.4)`;
+            ctx.lineWidth = sw + 8;
             ctx.stroke();
 
             // Main stroke
-            ctx.shadowBlur = 0;
+            ctx.shadowBlur = sw * 1.5;
+            ctx.shadowColor = segColor;
             ctx.strokeStyle = segColor;
             ctx.lineWidth = sw;
             ctx.stroke();
 
-            // Inner highlight
-            ctx.strokeStyle = `rgba(${Math.min(255, segRgb.r + 80)},${Math.min(255, segRgb.g + 80)},${Math.min(255, segRgb.b + 80)},0.5)`;
+            // Inner highlight (glitter sparkle)
+            ctx.shadowBlur = 0;
+            ctx.strokeStyle = `rgba(${Math.min(255, segRgb.r + 100)},${Math.min(255, segRgb.g + 100)},${Math.min(255, segRgb.b + 100)},0.6)`;
             ctx.lineWidth = Math.max(1, sw * 0.3);
             ctx.stroke();
           }
+
+          // Sparkle particles for rainbow (glitter effect)
+          ctx.save();
+          for (let i = 0; i < d.points.length; i += 3) {
+            const p = d.points[i];
+            const segColor = d.segmentColors[Math.min(i, d.segmentColors.length - 1)] || color;
+            const segRgb = hexToRgb(segColor);
+            for (let j = 0; j < 4; j++) {
+              const seed = dIdx * 10000 + i * 100 + j;
+              const r1 = seededRand(seed), r2 = seededRand(seed + 0.5), r3 = seededRand(seed + 1.0), r4 = seededRand(seed + 1.5);
+              const twinkle = Math.sin(time + r1 * 20) * 0.5 + 0.5;
+              if (twinkle < 0.3) continue;
+              const gx = p.x + (r2 - 0.5) * 24, gy = p.y + (r3 - 0.5) * 24;
+              const size = r4 * 3.0 + 0.8;
+              const mw = twinkle * 0.7;
+              ctx.globalAlpha = twinkle * 0.9;
+              ctx.fillStyle = `rgb(${Math.round(segRgb.r + (255 - segRgb.r) * mw)},${Math.round(segRgb.g + (255 - segRgb.g) * mw)},${Math.round(segRgb.b + (255 - segRgb.b) * mw)})`;
+              ctx.beginPath(); ctx.arc(gx, gy, size, 0, Math.PI * 2); ctx.fill();
+            }
+          }
+          ctx.globalAlpha = 1;
+          ctx.restore();
         } else {
           // Classic or glitter stroke
           const drawStroke = () => {
@@ -476,7 +542,6 @@ const DrawPage = () => {
           };
 
           if (d.brushMode === "glitter") {
-            // Neon glow for glitter
             ctx.shadowBlur = isSelected ? sw * 3 : sw * 2.5;
             ctx.shadowColor = color;
             ctx.strokeStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},0.4)`;
@@ -492,12 +557,10 @@ const DrawPage = () => {
             ctx.lineWidth = Math.max(1, sw * 0.3);
             drawStroke();
           } else {
-            // Classic: clean solid stroke, no glow
             ctx.strokeStyle = color;
             ctx.lineWidth = sw;
             drawStroke();
 
-            // Subtle inner highlight for depth
             ctx.strokeStyle = `rgba(${Math.min(255, rgb.r + 40)},${Math.min(255, rgb.g + 40)},${Math.min(255, rgb.b + 40)},0.3)`;
             ctx.lineWidth = Math.max(1, sw * 0.25);
             drawStroke();
@@ -506,10 +569,9 @@ const DrawPage = () => {
 
         ctx.restore();
 
-        // Glitter particles only for glitter brush
+        // Glitter particles for glitter brush
         if (d.brushMode === "glitter") {
           ctx.save();
-          const time = animTickRef.current * 0.05;
           for (let i = 0; i < d.points.length; i += 3) {
             const p = d.points[i];
             for (let j = 0; j < 5; j++) {
@@ -529,22 +591,40 @@ const DrawPage = () => {
           ctx.restore();
         }
 
-        // Selection indicator: subtle white dashed outline instead of yellow glow
+        // Selection indicator: rainbow glow instead of dotted box
         if (isSelected) {
           ctx.save();
-          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-          for (const p of d.points) {
-            if (p.x < minX) minX = p.x;
-            if (p.x > maxX) maxX = p.x;
-            if (p.y < minY) minY = p.y;
-            if (p.y > maxY) maxY = p.y;
+          const glowColors = RAINBOW_SEQUENCE;
+          const glowIdx = Math.floor(time * 3) % glowColors.length;
+          const glowColor = glowColors[glowIdx];
+          
+          // Draw the shape outline with rainbow glow
+          ctx.shadowBlur = 25;
+          ctx.shadowColor = glowColor;
+          ctx.strokeStyle = glowColor;
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          if (d.points.length > 0) {
+            ctx.moveTo(d.points[0].x, d.points[0].y);
+            for (let i = 1; i < d.points.length; i++) {
+              ctx.lineTo(d.points[i].x, d.points[i].y);
+            }
           }
-          const pad = 12;
-          ctx.setLineDash([8, 4]);
-          ctx.strokeStyle = "rgba(255,255,255,0.6)";
-          ctx.lineWidth = 2;
-          ctx.strokeRect(minX - pad, minY - pad, maxX - minX + pad * 2, maxY - minY + pad * 2);
-          ctx.setLineDash([]);
+          ctx.stroke();
+
+          // Second layer for stronger glow
+          ctx.shadowBlur = 40;
+          ctx.shadowColor = glowColor;
+          ctx.strokeStyle = `${glowColor}66`;
+          ctx.lineWidth = 6;
+          ctx.beginPath();
+          if (d.points.length > 0) {
+            ctx.moveTo(d.points[0].x, d.points[0].y);
+            for (let i = 1; i < d.points.length; i++) {
+              ctx.lineTo(d.points[i].x, d.points[i].y);
+            }
+          }
+          ctx.stroke();
           ctx.restore();
         }
       });
@@ -552,7 +632,15 @@ const DrawPage = () => {
 
     function drawNeonSkeleton(landmarks: any[]) {
       ctx.save();
-      ctx.shadowBlur = 15; ctx.shadowColor = "#ffffff"; ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 3;
+      const isDark = darkModeRef.current;
+      const boneColor = isDark ? "#ffffff" : "#1a1a1a";
+      const dotColor = isDark ? "#ffffff" : "#000000";
+      
+      ctx.shadowBlur = isDark ? 15 : 8;
+      ctx.shadowColor = isDark ? "#ffffff" : "rgba(0,0,0,0.4)";
+      ctx.strokeStyle = boneColor;
+      ctx.lineWidth = isDark ? 3 : 2.5;
+      
       const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
       connections.forEach(([a, b]) => {
         ctx.beginPath();
@@ -560,9 +648,9 @@ const DrawPage = () => {
         ctx.lineTo(landmarks[b].x * canvas!.width, landmarks[b].y * canvas!.height);
         ctx.stroke();
       });
-      ctx.fillStyle = "#ffffff";
+      ctx.fillStyle = dotColor;
       landmarks.forEach((point) => {
-        ctx.beginPath(); ctx.arc(point.x * canvas!.width, point.y * canvas!.height, 4, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(point.x * canvas!.width, point.y * canvas!.height, isDark ? 4 : 5, 0, Math.PI * 2); ctx.fill();
       });
       ctx.restore();
     }
@@ -572,8 +660,26 @@ const DrawPage = () => {
       animTickRef.current++;
       ctx.save();
       ctx.clearRect(0, 0, canvas!.width, canvas!.height);
-      ctx.fillStyle = "#0a0a0a";
+      
+      const isDark = darkModeRef.current;
+      ctx.fillStyle = isDark ? "#0a0a0a" : "#f5f0eb";
       ctx.fillRect(0, 0, canvas!.width, canvas!.height);
+      
+      // Light mode: subtle grid pattern
+      if (!isDark) {
+        ctx.save();
+        ctx.strokeStyle = "rgba(0,0,0,0.04)";
+        ctx.lineWidth = 1;
+        const gridSize = 40;
+        for (let x = 0; x < canvas!.width; x += gridSize) {
+          ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas!.height); ctx.stroke();
+        }
+        for (let y = 0; y < canvas!.height; y += gridSize) {
+          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas!.width, y); ctx.stroke();
+        }
+        ctx.restore();
+      }
+      
       drawStoredPaths();
 
       if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
@@ -624,7 +730,6 @@ const DrawPage = () => {
           else cp.holdFrames = 0;
           if (!cp.isShape && (!lastPt || distToLast > MIN_POINT_DISTANCE)) {
             cp.points.push({ x: ix, y: iy });
-            // For rainbow mode, cycle colors per segment
             if (cp.brushMode === "rainbow") {
               const rIdx = rainbowIndexRef.current % RAINBOW_SEQUENCE.length;
               if (!cp.segmentColors) cp.segmentColors = [];
@@ -692,8 +797,10 @@ const DrawPage = () => {
     };
     document.head.appendChild(script1);
 
-    // Mouse support
+    // Mouse support for drawing (not fill bucket)
     const handleMouseDown = (e: MouseEvent) => {
+      if (fillBucketActiveRef.current) return; // Let fill click handler deal with it
+      
       const rect = canvas.getBoundingClientRect();
       const x = (e.clientX - rect.left) / canvas.width;
       const y = (e.clientY - rect.top) / canvas.height;
@@ -758,14 +865,23 @@ const DrawPage = () => {
     };
   }, [showGesture]);
 
+  const bgDark = darkMode ? "rgba(10,10,10,0.85)" : "rgba(255,255,255,0.85)";
+  const borderThin = darkMode ? "1px solid rgba(255,255,255,0.08)" : "1px solid rgba(0,0,0,0.1)";
+  const textMain = darkMode ? "#fff" : "#1a1a1a";
+  const textDim = darkMode ? "rgba(255,255,255,0.5)" : "rgba(0,0,0,0.45)";
+
   return (
-    <div className="fixed inset-0" style={{ background: "#0a0a0a" }}>
+    <div className="fixed inset-0" style={{ background: darkMode ? "#0a0a0a" : "#f5f0eb" }}>
       <video ref={videoRef} className="absolute invisible w-px h-px" />
-      <canvas ref={canvasRef} className="absolute top-0 left-0 w-screen h-screen z-[5]" style={{ transform: "scaleX(-1)" }} />
+      <canvas
+        ref={canvasRef}
+        className="absolute top-0 left-0 w-screen h-screen z-[5]"
+        style={{ transform: "scaleX(-1)", cursor: fillBucketActive ? "crosshair" : "default" }}
+      />
 
       {/* Loading */}
       {loading && (
-        <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center gap-5" style={{ background: "#0a0a0a" }}>
+        <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center gap-5" style={{ background: darkMode ? "#0a0a0a" : "#f5f0eb" }}>
           <div className="flex gap-2.5">
             {[0, 1, 2].map((i) => (
               <div key={i} className="w-5 h-5 rounded-full" style={{
@@ -774,19 +890,24 @@ const DrawPage = () => {
               }} />
             ))}
           </div>
-          <p className="text-white/70 text-base font-semibold">Starting camera magic...</p>
+          <p style={{ color: darkMode ? "rgba(255,255,255,0.7)" : "rgba(0,0,0,0.6)" }} className="text-base font-semibold">
+            ✨ Starting camera magic...
+          </p>
         </div>
       )}
 
       {/* Color Picker */}
-      <div className="fixed left-3 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 z-50 rounded-[40px] p-2.5 backdrop-blur-xl max-h-[85vh] overflow-y-auto scrollbar-hide" style={{ transform: "translateY(-50%) scaleX(-1)", background: "rgba(10,10,10,0.85)", border: "1px solid rgba(255,255,255,0.08)", boxShadow: "0 8px 32px rgba(0,0,0,0.6)" }}>
+      <div
+        className="fixed left-3 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 z-50 rounded-[40px] p-2.5 backdrop-blur-xl max-h-[85vh] overflow-y-auto scrollbar-hide"
+        style={{ transform: "translateY(-50%) scaleX(-1)", background: bgDark, border: borderThin, boxShadow: darkMode ? "0 8px 32px rgba(0,0,0,0.6)" : "0 8px 32px rgba(0,0,0,0.1)" }}
+      >
         <div className="text-center text-lg mb-1" style={{ transform: "scaleX(-1)" }}>🎨</div>
         {activeColors.map((c) => (
           <button key={c} onClick={() => setCurrentColor(c)}
             className="w-8 h-8 rounded-full border-2 cursor-pointer transition-all duration-200"
             style={{
               background: c,
-              borderColor: currentColor === c ? "#fff" : "transparent",
+              borderColor: currentColor === c ? (darkMode ? "#fff" : "#000") : "transparent",
               transform: currentColor === c ? "scale(1.2)" : "scale(1)",
               boxShadow: currentColor === c ? `0 0 12px ${c}` : "none",
             }}
@@ -796,20 +917,18 @@ const DrawPage = () => {
 
       {/* Brush Mode Panel */}
       <div className="fixed right-3 top-1/2 -translate-y-1/2 flex flex-col gap-2 z-50" style={{ transform: "translateY(-50%) scaleX(-1)" }}>
-        {/* Brush toggle */}
         <button
           onClick={() => setShowBrushPanel(!showBrushPanel)}
           className="w-[50px] h-[50px] rounded-2xl flex items-center justify-center text-xl cursor-pointer transition-all hover:scale-110 active:scale-90"
-          style={{ background: "rgba(10,10,10,0.85)", backdropFilter: "blur(16px)", border: "1px solid rgba(255,255,255,0.1)" }}
+          style={{ background: bgDark, backdropFilter: "blur(16px)", border: borderThin }}
         >
           🖌️
         </button>
 
         {showBrushPanel && (
-          <div className="flex flex-col gap-2 p-3 rounded-2xl" style={{ transform: "scaleX(-1)", background: "rgba(10,10,10,0.9)", border: "1px solid rgba(255,255,255,0.1)", backdropFilter: "blur(16px)" }}>
-            <p className="text-white/50 text-[10px] uppercase tracking-wider font-bold text-center">Brush</p>
+          <div className="flex flex-col gap-2 p-3 rounded-2xl" style={{ transform: "scaleX(-1)", background: bgDark, border: borderThin, backdropFilter: "blur(16px)" }}>
+            <p style={{ color: textDim }} className="text-[10px] uppercase tracking-wider font-bold text-center">Brush</p>
 
-            {/* Brush modes */}
             {([
               { mode: "classic" as BrushMode, label: "Classic", icon: "✏️" },
               { mode: "glitter" as BrushMode, label: "Glitter", icon: "✨" },
@@ -818,9 +937,9 @@ const DrawPage = () => {
               <button key={mode} onClick={() => setBrushMode(mode)}
                 className="flex items-center gap-2 px-3 py-2 rounded-xl cursor-pointer transition-all text-xs font-semibold"
                 style={{
-                  background: brushMode === mode ? "rgba(255,255,255,0.15)" : "transparent",
-                  color: brushMode === mode ? "#fff" : "rgba(255,255,255,0.5)",
-                  border: brushMode === mode ? "1px solid rgba(255,255,255,0.2)" : "1px solid transparent",
+                  background: brushMode === mode ? (darkMode ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.1)") : "transparent",
+                  color: brushMode === mode ? textMain : textDim,
+                  border: brushMode === mode ? (darkMode ? "1px solid rgba(255,255,255,0.2)" : "1px solid rgba(0,0,0,0.15)") : "1px solid transparent",
                 }}
               >
                 <span className="text-base">{icon}</span>
@@ -829,38 +948,50 @@ const DrawPage = () => {
             ))}
 
             {/* Stroke size */}
-            <p className="text-white/50 text-[10px] uppercase tracking-wider font-bold text-center mt-2">Size</p>
+            <p style={{ color: textDim }} className="text-[10px] uppercase tracking-wider font-bold text-center mt-2">Size</p>
             <div className="flex flex-col items-center gap-1">
               <input
                 type="range" min="2" max="30" value={strokeWidth}
                 onChange={(e) => setStrokeWidth(Number(e.target.value))}
-                className="w-full accent-white"
-                style={{ height: "4px" }}
+                className="w-full"
+                style={{ height: "4px", accentColor: darkMode ? "#fff" : "#333" }}
               />
               <div className="flex items-center justify-center">
-                <div className="rounded-full bg-white" style={{ width: strokeWidth, height: strokeWidth }} />
+                <div className="rounded-full" style={{ width: strokeWidth, height: strokeWidth, background: darkMode ? "#fff" : "#333" }} />
               </div>
             </div>
 
-            {/* Fill toggle */}
-            <p className="text-white/50 text-[10px] uppercase tracking-wider font-bold text-center mt-2">Fill</p>
-            <button onClick={() => setFillMode(!fillMode)}
+            {/* Fill bucket */}
+            <p style={{ color: textDim }} className="text-[10px] uppercase tracking-wider font-bold text-center mt-2">Fill</p>
+            <button onClick={() => setFillBucketActive(!fillBucketActive)}
               className="flex items-center gap-2 px-3 py-2 rounded-xl cursor-pointer transition-all text-xs font-semibold"
               style={{
-                background: fillMode ? "rgba(255,255,255,0.15)" : "transparent",
-                color: fillMode ? "#fff" : "rgba(255,255,255,0.5)",
-                border: fillMode ? "1px solid rgba(255,255,255,0.2)" : "1px solid transparent",
+                background: fillBucketActive ? (darkMode ? "rgba(255,200,0,0.2)" : "rgba(255,180,0,0.2)") : "transparent",
+                color: fillBucketActive ? (darkMode ? "#FFE66D" : "#E67E22") : textDim,
+                border: fillBucketActive ? "1px solid rgba(255,200,0,0.3)" : "1px solid transparent",
               }}
             >
               <span className="text-base">🪣</span>
-              <span>Fill Shape</span>
+              <span>Fill Bucket</span>
             </button>
+            <p style={{ color: textDim, fontSize: "8px", textAlign: "center", lineHeight: "1.2" }}>
+              Click a shape to fill it!
+            </p>
           </div>
         )}
       </div>
 
       {/* Toolbar */}
       <div className="fixed top-4 right-4 flex gap-2 z-50" style={{ transform: "scaleX(-1)" }}>
+        {/* Dark/Light mode toggle */}
+        <button
+          onClick={() => setDarkMode(!darkMode)}
+          className="w-[46px] h-[46px] rounded-2xl flex items-center justify-center text-xl cursor-pointer transition-all hover:scale-110 active:scale-90"
+          style={{ background: bgDark, backdropFilter: "blur(16px)", border: borderThin }}
+          title={darkMode ? "Switch to Light Mode" : "Switch to Dark Mode"}
+        >
+          {darkMode ? "☀️" : "🌙"}
+        </button>
         {[
           { id: "download", emoji: "💾", action: downloadDoodle },
           { id: "clear", emoji: "🗑️", action: clearAll },
@@ -869,7 +1000,7 @@ const DrawPage = () => {
         ].map((btn) => (
           <button key={btn.id} onClick={btn.action}
             className="w-[46px] h-[46px] rounded-2xl flex items-center justify-center text-xl cursor-pointer transition-all hover:scale-110 active:scale-90"
-            style={{ background: "rgba(10,10,10,0.8)", backdropFilter: "blur(16px)", border: "1px solid rgba(255,255,255,0.06)" }}
+            style={{ background: bgDark, backdropFilter: "blur(16px)", border: borderThin }}
           >
             {btn.emoji}
           </button>
@@ -878,7 +1009,7 @@ const DrawPage = () => {
 
       {/* Gesture Indicator */}
       <div className={`fixed bottom-5 left-1/2 z-50 font-body font-bold text-sm px-6 py-2.5 rounded-full pointer-events-none transition-opacity duration-300 ${gestureVisible ? "opacity-100" : "opacity-0"}`}
-        style={{ transform: "translateX(-50%) scaleX(-1)", background: "rgba(10,10,10,0.85)", backdropFilter: "blur(14px)", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.85)" }}
+        style={{ transform: "translateX(-50%) scaleX(-1)", background: bgDark, backdropFilter: "blur(14px)", border: borderThin, color: textMain }}
       >
         {gestureText}
       </div>
