@@ -1,21 +1,28 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 
-const COLORS = [
-  // Rainbow fun
+// --- Color Palettes ---
+const CLASSIC_COLORS = [
+  "#FFFFFF", "#000000", "#333333", "#666666",
+  "#C0392B", "#E74C3C", "#2980B9", "#3498DB",
+  "#27AE60", "#2ECC71", "#F39C12", "#F1C40F",
+  "#8E44AD", "#9B59B6", "#1ABC9C", "#E67E22",
+  "#2C3E50", "#7F8C8D",
+];
+
+const GLITTER_COLORS = [
   "#FF3B3B", "#FF6B6B", "#FF9F1C", "#FFE66D",
   "#00F5A0", "#4ECDC4", "#2BCBFF", "#9B5DE5",
   "#F04299", "#FF85C0",
-  // Neon party
   "#39FF14", "#FF073A", "#DFFF00", "#FF6EC7",
-  // Pastels
   "#FFB3BA", "#BAFFC9", "#BAE1FF", "#E8BAFF",
 ];
+
+type BrushMode = "classic" | "glitter" | "rainbow";
 
 const ERASER_RADIUS = 45;
 
 // --- 1€ (One Euro) Adaptive Filter ---
-// Provides low jitter when hand is still, high responsiveness when moving fast.
 class OneEuroFilter {
   private minCutoff: number;
   private beta: number;
@@ -41,16 +48,12 @@ class OneEuroFilter {
       this.tPrev = timestamp;
       return x;
     }
-    const dt = Math.max((timestamp - this.tPrev) / 1000, 0.001); // seconds
+    const dt = Math.max((timestamp - this.tPrev) / 1000, 0.001);
     this.tPrev = timestamp;
-
-    // Estimate derivative (velocity)
     const dx = (x - this.xPrev) / dt;
     const aD = this.smoothingFactor(this.dCutoff, dt);
     const dxSmoothed = aD * dx + (1 - aD) * this.dxPrev;
     this.dxPrev = dxSmoothed;
-
-    // Adaptive cutoff based on speed
     const cutoff = this.minCutoff + this.beta * Math.abs(dxSmoothed);
     const a = this.smoothingFactor(cutoff, dt);
     const xFiltered = a * x + (1 - a) * this.xPrev;
@@ -65,11 +68,15 @@ class OneEuroFilter {
   }
 }
 
-// --- Position history buffer for outlier rejection ---
 const HISTORY_SIZE = 5;
-const OUTLIER_MULTIPLIER = 3.5; // reject jumps > 3.5x recent avg velocity
-const MIN_POINT_DISTANCE = 4; // minimum px between drawn points (deadzone)
-const HOLD_FRAMES_THRESHOLD = 15; // frames before shape snap triggers
+const OUTLIER_MULTIPLIER = 3.5;
+const MIN_POINT_DISTANCE = 4;
+const HOLD_FRAMES_THRESHOLD = 15;
+
+const RAINBOW_SEQUENCE = [
+  "#FF0000", "#FF7F00", "#FFFF00", "#00FF00",
+  "#0000FF", "#4B0082", "#8B00FF",
+];
 
 interface Point { x: number; y: number; }
 interface Drawing {
@@ -78,6 +85,11 @@ interface Drawing {
   id: number;
   holdFrames: number;
   isShape: boolean;
+  brushMode: BrushMode;
+  strokeWidth: number;
+  filled: boolean;
+  // For rainbow mode, store color per segment
+  segmentColors?: string[];
 }
 
 const DrawPage = () => {
@@ -86,9 +98,12 @@ const DrawPage = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [loading, setLoading] = useState(true);
   const [currentColor, setCurrentColor] = useState("#FF3B3B");
-  const [isDarkTheme, setIsDarkTheme] = useState(true);
   const [gestureText, setGestureText] = useState("");
   const [gestureVisible, setGestureVisible] = useState(false);
+  const [brushMode, setBrushMode] = useState<BrushMode>("classic");
+  const [strokeWidth, setStrokeWidth] = useState(6);
+  const [fillMode, setFillMode] = useState(false);
+  const [showBrushPanel, setShowBrushPanel] = useState(false);
 
   const drawingsRef = useRef<Drawing[]>([]);
   const currentPathRef = useRef<Drawing | null>(null);
@@ -104,11 +119,16 @@ const DrawPage = () => {
   const pinchFilterYRef = useRef<OneEuroFilter>(new OneEuroFilter(1.5, 0.005, 1.0));
   const animTickRef = useRef(0);
   const currentColorRef = useRef(currentColor);
-  const isDarkThemeRef = useRef(isDarkTheme);
+  const brushModeRef = useRef(brushMode);
+  const strokeWidthRef = useRef(strokeWidth);
+  const fillModeRef = useRef(fillMode);
+  const rainbowIndexRef = useRef(0);
   const gestureTimerRef = useRef<ReturnType<typeof setTimeout>>();
 
   useEffect(() => { currentColorRef.current = currentColor; }, [currentColor]);
-  useEffect(() => { isDarkThemeRef.current = isDarkTheme; }, [isDarkTheme]);
+  useEffect(() => { brushModeRef.current = brushMode; }, [brushMode]);
+  useEffect(() => { strokeWidthRef.current = strokeWidth; }, [strokeWidth]);
+  useEffect(() => { fillModeRef.current = fillMode; }, [fillMode]);
 
   const showGesture = useCallback((text: string) => {
     setGestureText(text);
@@ -120,20 +140,15 @@ const DrawPage = () => {
   const downloadDoodle = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
-    // Create a temporary canvas to save the image (without UI)
     const tempCanvas = document.createElement("canvas");
     tempCanvas.width = canvas.width;
     tempCanvas.height = canvas.height;
     const tempCtx = tempCanvas.getContext("2d")!;
-
-    // Mirror back so the saved image is readable/correctly oriented
     tempCtx.save();
     tempCtx.translate(tempCanvas.width, 0);
     tempCtx.scale(-1, 1);
     tempCtx.drawImage(canvas, 0, 0);
     tempCtx.restore();
-
     const link = document.createElement("a");
     link.download = `my-doodle-${Date.now()}.png`;
     link.href = tempCanvas.toDataURL("image/png");
@@ -154,6 +169,8 @@ const DrawPage = () => {
     }
   }, [showGesture]);
 
+  const activeColors = brushMode === "classic" ? CLASSIC_COLORS : GLITTER_COLORS;
+
   useEffect(() => {
     const canvas = canvasRef.current;
     const video = videoRef.current;
@@ -168,7 +185,6 @@ const DrawPage = () => {
     setupCanvas();
     window.addEventListener("resize", setupCanvas);
 
-    // Helper functions
     function hexToRgb(hex: string) {
       hex = hex.replace("#", "");
       return {
@@ -236,7 +252,7 @@ const DrawPage = () => {
         if (segment.length >= 2) newSegments.push(segment);
         drawingsRef.current.splice(i, 1);
         for (const seg of newSegments) {
-          drawingsRef.current.splice(i, 0, { points: seg, color: d.color, id: Date.now() + Math.random(), holdFrames: 0, isShape: false });
+          drawingsRef.current.splice(i, 0, { points: seg, color: d.color, id: Date.now() + Math.random(), holdFrames: 0, isShape: false, brushMode: d.brushMode, strokeWidth: d.strokeWidth, filled: d.filled, segmentColors: d.segmentColors });
         }
       }
     }
@@ -253,7 +269,6 @@ const DrawPage = () => {
         if (diff > Math.PI) diff = 2 * Math.PI - diff;
         if (diff > 0.35) angles.push({ idx: i, angle: diff });
       }
-      // Merge nearby corners (larger merge radius for noisy input)
       const merged: Point[] = [];
       for (const a of angles) {
         const last = merged[merged.length - 1];
@@ -263,11 +278,9 @@ const DrawPage = () => {
       return merged;
     }
 
-    // Outlier rejection: checks if a new position is an unreasonable jump
     function isOutlier(nx: number, ny: number, now: number): boolean {
       const hist = posHistoryRef.current;
       if (hist.length < 2) return false;
-      // compute average velocity over recent history
       let totalDist = 0;
       for (let i = 1; i < hist.length; i++) {
         totalDist += Math.hypot(hist[i].x - hist[i - 1].x, hist[i].y - hist[i - 1].y);
@@ -305,18 +318,19 @@ const DrawPage = () => {
           if (totalDeviation / pts.length < avgRadius * 0.22) {
             const newPts: Point[] = [];
             for (let i = 0; i <= 40; i++) { const angle = (i / 40) * Math.PI * 2; newPts.push({ x: cx + Math.cos(angle) * avgRadius, y: cy + Math.sin(angle) * avgRadius }); }
-            path.points = newPts; showGesture("✨ Perfect Circle!"); return;
+            path.points = newPts; path.isShape = true;
+            if (fillModeRef.current) path.filled = true;
+            showGesture("✨ Perfect Circle!"); return;
           }
         }
-        // Check for triangle: find corners by analyzing angle changes
         const corners = findCorners(pts);
         if (corners.length === 3) {
           const [a, b, c] = corners;
           path.points = [a, b, c, a];
-          path.isShape = true; showGesture("🔺 Perfect Triangle!"); return;
+          path.isShape = true;
+          if (fillModeRef.current) path.filled = true;
+          showGesture("🔺 Perfect Triangle!"); return;
         }
-
-        // Check for diamond (4 corners with roughly equal sides)
         if (corners.length === 4) {
           const [a, b, c, d] = corners;
           const sides = [
@@ -326,19 +340,19 @@ const DrawPage = () => {
           const avgSide = sides.reduce((s,v)=>s+v,0)/4;
           const sideVar = sides.every(s => Math.abs(s - avgSide) < avgSide * 0.35);
           if (sideVar) {
-            // Check if it's rotated (diamond) vs axis-aligned (square)
             const topIdx = [a,b,c,d].reduce((mi, p, i, arr) => p.y < arr[mi].y ? i : mi, 0);
             const sorted = [...[a,b,c,d].slice(topIdx), ...[a,b,c,d].slice(0, topIdx)];
             const isAxisAligned = Math.abs(sorted[0].x - cx) < width * 0.15;
             if (isAxisAligned) {
-              // Diamond shape
               const r = avgSide / Math.sqrt(2);
               path.points = [
                 { x: cx, y: cy - r }, { x: cx + r, y: cy },
                 { x: cx, y: cy + r }, { x: cx - r, y: cy },
                 { x: cx, y: cy - r }
               ];
-              path.isShape = true; showGesture("💎 Perfect Diamond!"); return;
+              path.isShape = true;
+              if (fillModeRef.current) path.filled = true;
+              showGesture("💎 Perfect Diamond!"); return;
             }
           }
         }
@@ -350,7 +364,9 @@ const DrawPage = () => {
           const sizeX = isSquare ? Math.max(width, height) : width;
           const sizeY = isSquare ? Math.max(width, height) : height;
           path.points = [{ x: cx - sizeX / 2, y: cy - sizeY / 2 }, { x: cx + sizeX / 2, y: cy - sizeY / 2 }, { x: cx + sizeX / 2, y: cy + sizeY / 2 }, { x: cx - sizeX / 2, y: cy + sizeY / 2 }, { x: cx - sizeX / 2, y: cy - sizeY / 2 }];
-          path.isShape = true; showGesture(isSquare ? "🟩 Perfect Square!" : "🔲 Perfect Rectangle!"); return;
+          path.isShape = true;
+          if (fillModeRef.current) path.filled = true;
+          showGesture(isSquare ? "🟩 Perfect Square!" : "🔲 Perfect Rectangle!"); return;
         }
       } else {
         const lineLen = Math.hypot(last.x - first.x, last.y - first.y);
@@ -373,10 +389,26 @@ const DrawPage = () => {
     function drawEraserCursor(x: number, y: number) {
       ctx.save();
       ctx.beginPath(); ctx.arc(x, y, ERASER_RADIUS, 0, Math.PI * 2);
-      ctx.strokeStyle = isDarkThemeRef.current ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.4)";
+      ctx.strokeStyle = "rgba(255,255,255,0.6)";
       ctx.lineWidth = 2.5; ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
       ctx.beginPath(); ctx.arc(x, y, ERASER_RADIUS, 0, Math.PI * 2);
       ctx.fillStyle = "rgba(255,100,100,0.12)"; ctx.fill();
+      ctx.restore();
+    }
+
+    function fillClosedShape(d: Drawing) {
+      if (!d.filled || d.points.length < 3) return;
+      const color = d.color;
+      const rgb = hexToRgb(color);
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(d.points[0].x, d.points[0].y);
+      for (let i = 1; i < d.points.length; i++) {
+        ctx.lineTo(d.points[i].x, d.points[i].y);
+      }
+      ctx.closePath();
+      ctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},0.35)`;
+      ctx.fill();
       ctx.restore();
     }
 
@@ -387,63 +419,134 @@ const DrawPage = () => {
         const isSelected = selectedDrawingRef.current && selectedDrawingRef.current.id === d.id;
         const color = d.color || "#FF3B3B";
         const rgb = hexToRgb(color);
+        const sw = d.strokeWidth || 6;
         ctx.save();
 
-        const drawStroke = () => {
-          ctx.beginPath();
-          if (d.points.length > 0) {
-            ctx.moveTo(d.points[0].x, d.points[0].y);
-            if (d.isShape) {
-              for (let i = 1; i < d.points.length; i++) ctx.lineTo(d.points[i].x, d.points[i].y);
-            } else {
-              for (let i = 1; i < d.points.length - 1; i++) {
-                const xc = (d.points[i].x + d.points[i + 1].x) / 2;
-                const yc = (d.points[i].y + d.points[i + 1].y) / 2;
-                ctx.quadraticCurveTo(d.points[i].x, d.points[i].y, xc, yc);
-              }
-              if (d.points.length > 1) { const last = d.points[d.points.length - 1]; ctx.lineTo(last.x, last.y); }
-            }
+        // Fill closed shapes if filled
+        if (d.filled && d.isShape) {
+          fillClosedShape(d);
+        }
+
+        if (d.brushMode === "rainbow" && d.segmentColors && d.segmentColors.length > 0) {
+          // Rainbow mode: draw each segment with its own color
+          for (let i = 1; i < d.points.length; i++) {
+            const segColor = d.segmentColors[Math.min(i - 1, d.segmentColors.length - 1)] || color;
+            const segRgb = hexToRgb(segColor);
+            ctx.beginPath();
+            ctx.moveTo(d.points[i - 1].x, d.points[i - 1].y);
+            ctx.lineTo(d.points[i].x, d.points[i].y);
+
+            // Outer glow
+            ctx.shadowBlur = sw * 2;
+            ctx.shadowColor = segColor;
+            ctx.strokeStyle = `rgba(${segRgb.r},${segRgb.g},${segRgb.b},0.5)`;
+            ctx.lineWidth = sw + 4;
+            ctx.stroke();
+
+            // Main stroke
+            ctx.shadowBlur = 0;
+            ctx.strokeStyle = segColor;
+            ctx.lineWidth = sw;
+            ctx.stroke();
+
+            // Inner highlight
+            ctx.strokeStyle = `rgba(${Math.min(255, segRgb.r + 80)},${Math.min(255, segRgb.g + 80)},${Math.min(255, segRgb.b + 80)},0.5)`;
+            ctx.lineWidth = Math.max(1, sw * 0.3);
+            ctx.stroke();
           }
-          ctx.lineJoin = d.isShape ? "miter" : "round";
-          ctx.stroke();
-        };
+        } else {
+          // Classic or glitter stroke
+          const drawStroke = () => {
+            ctx.beginPath();
+            if (d.points.length > 0) {
+              ctx.moveTo(d.points[0].x, d.points[0].y);
+              if (d.isShape) {
+                for (let i = 1; i < d.points.length; i++) ctx.lineTo(d.points[i].x, d.points[i].y);
+              } else {
+                for (let i = 1; i < d.points.length - 1; i++) {
+                  const xc = (d.points[i].x + d.points[i + 1].x) / 2;
+                  const yc = (d.points[i].y + d.points[i + 1].y) / 2;
+                  ctx.quadraticCurveTo(d.points[i].x, d.points[i].y, xc, yc);
+                }
+                if (d.points.length > 1) { const last = d.points[d.points.length - 1]; ctx.lineTo(last.x, last.y); }
+              }
+            }
+            ctx.lineJoin = d.isShape ? "miter" : "round";
+            ctx.stroke();
+          };
 
-        ctx.shadowBlur = isSelected ? 45 : 30;
-        ctx.shadowColor = isSelected ? "#ffff00" : color;
-        ctx.strokeStyle = isSelected ? "rgba(255,255,0,0.5)" : `rgba(${rgb.r},${rgb.g},${rgb.b},0.4)`;
-        ctx.lineWidth = isSelected ? 34 : 28;
-        drawStroke();
+          if (d.brushMode === "glitter") {
+            // Neon glow for glitter
+            ctx.shadowBlur = isSelected ? sw * 3 : sw * 2.5;
+            ctx.shadowColor = color;
+            ctx.strokeStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},0.4)`;
+            ctx.lineWidth = sw + 6;
+            drawStroke();
 
-        ctx.shadowBlur = 0;
-        ctx.strokeStyle = isSelected ? "#ffff00" : color;
-        ctx.lineWidth = isSelected ? 26 : 22;
-        drawStroke();
+            ctx.shadowBlur = 0;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = sw;
+            drawStroke();
 
-        ctx.strokeStyle = isSelected ? "#fffde7" : `rgba(${Math.min(255, rgb.r + 80)},${Math.min(255, rgb.g + 80)},${Math.min(255, rgb.b + 80)},0.7)`;
-        ctx.lineWidth = isSelected ? 8 : 6;
-        drawStroke();
-        ctx.restore();
+            ctx.strokeStyle = `rgba(${Math.min(255, rgb.r + 80)},${Math.min(255, rgb.g + 80)},${Math.min(255, rgb.b + 80)},0.7)`;
+            ctx.lineWidth = Math.max(1, sw * 0.3);
+            drawStroke();
+          } else {
+            // Classic: clean solid stroke, no glow
+            ctx.strokeStyle = color;
+            ctx.lineWidth = sw;
+            drawStroke();
 
-        // Glitter
-        ctx.save();
-        const time = animTickRef.current * 0.05;
-        for (let i = 0; i < d.points.length; i += 3) {
-          const p = d.points[i];
-          for (let j = 0; j < 5; j++) {
-            const seed = dIdx * 10000 + i * 100 + j;
-            const r1 = seededRand(seed), r2 = seededRand(seed + 0.5), r3 = seededRand(seed + 1.0), r4 = seededRand(seed + 1.5);
-            const twinkle = Math.sin(time + r1 * 20) * 0.5 + 0.5;
-            if (twinkle < 0.25) continue;
-            const gx = p.x + (r2 - 0.5) * 24, gy = p.y + (r3 - 0.5) * 24;
-            const size = r4 * 3.0 + 0.8;
-            const mw = twinkle * 0.7;
-            ctx.globalAlpha = twinkle * 0.9;
-            ctx.fillStyle = `rgb(${Math.round(rgb.r + (255 - rgb.r) * mw)},${Math.round(rgb.g + (255 - rgb.g) * mw)},${Math.round(rgb.b + (255 - rgb.b) * mw)})`;
-            ctx.beginPath(); ctx.arc(gx, gy, size, 0, Math.PI * 2); ctx.fill();
+            // Subtle inner highlight for depth
+            ctx.strokeStyle = `rgba(${Math.min(255, rgb.r + 40)},${Math.min(255, rgb.g + 40)},${Math.min(255, rgb.b + 40)},0.3)`;
+            ctx.lineWidth = Math.max(1, sw * 0.25);
+            drawStroke();
           }
         }
-        ctx.globalAlpha = 1;
+
         ctx.restore();
+
+        // Glitter particles only for glitter brush
+        if (d.brushMode === "glitter") {
+          ctx.save();
+          const time = animTickRef.current * 0.05;
+          for (let i = 0; i < d.points.length; i += 3) {
+            const p = d.points[i];
+            for (let j = 0; j < 5; j++) {
+              const seed = dIdx * 10000 + i * 100 + j;
+              const r1 = seededRand(seed), r2 = seededRand(seed + 0.5), r3 = seededRand(seed + 1.0), r4 = seededRand(seed + 1.5);
+              const twinkle = Math.sin(time + r1 * 20) * 0.5 + 0.5;
+              if (twinkle < 0.25) continue;
+              const gx = p.x + (r2 - 0.5) * 24, gy = p.y + (r3 - 0.5) * 24;
+              const size = r4 * 3.0 + 0.8;
+              const mw = twinkle * 0.7;
+              ctx.globalAlpha = twinkle * 0.9;
+              ctx.fillStyle = `rgb(${Math.round(rgb.r + (255 - rgb.r) * mw)},${Math.round(rgb.g + (255 - rgb.g) * mw)},${Math.round(rgb.b + (255 - rgb.b) * mw)})`;
+              ctx.beginPath(); ctx.arc(gx, gy, size, 0, Math.PI * 2); ctx.fill();
+            }
+          }
+          ctx.globalAlpha = 1;
+          ctx.restore();
+        }
+
+        // Selection indicator: subtle white dashed outline instead of yellow glow
+        if (isSelected) {
+          ctx.save();
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+          for (const p of d.points) {
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.y > maxY) maxY = p.y;
+          }
+          const pad = 12;
+          ctx.setLineDash([8, 4]);
+          ctx.strokeStyle = "rgba(255,255,255,0.6)";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(minX - pad, minY - pad, maxX - minX + pad * 2, maxY - minY + pad * 2);
+          ctx.setLineDash([]);
+          ctx.restore();
+        }
       });
     }
 
@@ -469,7 +572,7 @@ const DrawPage = () => {
       animTickRef.current++;
       ctx.save();
       ctx.clearRect(0, 0, canvas!.width, canvas!.height);
-      ctx.fillStyle = isDarkThemeRef.current ? "#2a2a2a" : "#f5f0e8";
+      ctx.fillStyle = "#0a0a0a";
       ctx.fillRect(0, 0, canvas!.width, canvas!.height);
       drawStoredPaths();
 
@@ -491,14 +594,12 @@ const DrawPage = () => {
           drawPointerCursor((ix + mx) / 2, (iy + my) / 2);
           currentPathRef.current = null; isDraggingRef.current = false; selectedDrawingRef.current = null;
         } else if (isStrictlyIndexUp(hand) && !isPinching(hand)) {
-          // --- 1€ filter + outlier rejection ---
           const now = performance.now();
           if (!isOutlier(ix, iy, now)) {
             pushHistory(ix, iy, now);
             ix = filterXRef.current.filter(ix, now);
             iy = filterYRef.current.filter(iy, now);
           } else {
-            // Use last known good position
             const hist = posHistoryRef.current;
             if (hist.length > 0) {
               ix = hist[hist.length - 1].x;
@@ -507,8 +608,13 @@ const DrawPage = () => {
           }
 
           if (!currentPathRef.current) {
-            currentPathRef.current = { points: [], color: currentColorRef.current, id: Date.now(), holdFrames: 0, isShape: false };
+            currentPathRef.current = {
+              points: [], color: currentColorRef.current, id: Date.now(), holdFrames: 0, isShape: false,
+              brushMode: brushModeRef.current, strokeWidth: strokeWidthRef.current, filled: false,
+              segmentColors: [],
+            };
             drawingsRef.current.push(currentPathRef.current);
+            rainbowIndexRef.current = 0;
           }
           const cp = currentPathRef.current;
           const lastPt = cp.points[cp.points.length - 1];
@@ -516,7 +622,16 @@ const DrawPage = () => {
 
           if (distToLast < 8) { cp.holdFrames++; if (cp.holdFrames > HOLD_FRAMES_THRESHOLD && !cp.isShape) recognizeAndRefineShape(cp); }
           else cp.holdFrames = 0;
-          if (!cp.isShape && (!lastPt || distToLast > MIN_POINT_DISTANCE)) cp.points.push({ x: ix, y: iy });
+          if (!cp.isShape && (!lastPt || distToLast > MIN_POINT_DISTANCE)) {
+            cp.points.push({ x: ix, y: iy });
+            // For rainbow mode, cycle colors per segment
+            if (cp.brushMode === "rainbow") {
+              const rIdx = rainbowIndexRef.current % RAINBOW_SEQUENCE.length;
+              if (!cp.segmentColors) cp.segmentColors = [];
+              cp.segmentColors.push(RAINBOW_SEQUENCE[rIdx]);
+              rainbowIndexRef.current++;
+            }
+          }
           isDraggingRef.current = false; selectedDrawingRef.current = null;
         } else if (isPinching(hand)) {
           filterXRef.current.reset(); filterYRef.current.reset();
@@ -577,57 +692,29 @@ const DrawPage = () => {
     };
     document.head.appendChild(script1);
 
-    // --- Mouse support for simulation/debug ---
+    // Mouse support
     const handleMouseDown = (e: MouseEvent) => {
       const rect = canvas.getBoundingClientRect();
       const x = (e.clientX - rect.left) / canvas.width;
       const y = (e.clientY - rect.top) / canvas.height;
-      // Invert x because canvas is scaleX(-1)
       const invX = 1 - x;
-      
-      const simulateHand = (isErase = false, isPinch = false) => {
-        const hand = Array(21).fill(0).map(() => ({ x: invX, y: y }));
-        // Tip of index
-        hand[8] = { x: invX, y: y };
-        // Joint of index
-        hand[6] = { x: invX, y: y + 0.1 };
-        
-        if (isErase) {
-          // Tip of middle
-          hand[12] = { x: invX + 0.02, y: y };
-          hand[10] = { x: invX + 0.02, y: y + 0.1 };
-          // Tip of ring
-          hand[16] = { x: invX + 0.04, y: y };
-          hand[14] = { x: invX + 0.04, y: y + 0.1 };
-        } else if (isPinch) {
-          // Thumb tip close to index tip
-          hand[4] = { x: invX + 0.01, y: y + 0.01 };
-        } else {
-          // Other fingers down
-          hand[12] = { x: invX + 0.02, y: y + 0.2 };
-          hand[10] = { x: invX + 0.02, y: y + 0.15 };
-        }
-        onResults({ multiHandLandmarks: [hand] });
-      };
 
       const handleMove = (me: MouseEvent) => {
         const mRect = canvas.getBoundingClientRect();
         const mx = (me.clientX - mRect.left) / canvas.width;
         const my = (me.clientY - mRect.top) / canvas.height;
         const mInvX = 1 - mx;
-        
+
         const hand = Array(21).fill(0).map(() => ({ x: mInvX, y: my }));
         hand[8] = { x: mInvX, y: my };
         hand[6] = { x: mInvX, y: my + 0.1 };
-        
+
         if (me.buttons === 2 || (me.buttons === 1 && me.ctrlKey)) {
-          // Erase (Right click or Ctrl+Click)
           hand[12] = { x: mInvX + 0.02, y: my };
           hand[10] = { x: mInvX + 0.02, y: my + 0.1 };
           hand[16] = { x: mInvX + 0.04, y: my };
           hand[14] = { x: mInvX + 0.04, y: my + 0.1 };
         } else if (me.shiftKey) {
-          // Pinch
           hand[4] = { x: mInvX + 0.01, y: my + 0.01 };
         } else {
           hand[12] = { x: mInvX + 0.02, y: my + 0.2 };
@@ -644,26 +731,41 @@ const DrawPage = () => {
 
       window.addEventListener("mousemove", handleMove);
       window.addEventListener("mouseup", handleUp);
-      simulateHand(e.buttons === 2, e.shiftKey);
+
+      const hand = Array(21).fill(0).map(() => ({ x: invX, y: y }));
+      hand[8] = { x: invX, y: y };
+      hand[6] = { x: invX, y: y + 0.1 };
+      if (e.buttons === 2) {
+        hand[12] = { x: invX + 0.02, y: y };
+        hand[10] = { x: invX + 0.02, y: y + 0.1 };
+        hand[16] = { x: invX + 0.04, y: y };
+        hand[14] = { x: invX + 0.04, y: y + 0.1 };
+      } else if (e.shiftKey) {
+        hand[4] = { x: invX + 0.01, y: y + 0.01 };
+      } else {
+        hand[12] = { x: invX + 0.02, y: y + 0.2 };
+        hand[10] = { x: invX + 0.02, y: y + 0.15 };
+      }
+      onResults({ multiHandLandmarks: [hand] });
     };
 
     canvas.addEventListener("mousedown", handleMouseDown);
     canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
-    return () => { 
-      window.removeEventListener("resize", setupCanvas); 
+    return () => {
+      window.removeEventListener("resize", setupCanvas);
       canvas.removeEventListener("mousedown", handleMouseDown);
     };
   }, [showGesture]);
 
   return (
-    <div className="fixed inset-0" style={{ background: isDarkTheme ? "#2a2a2a" : "#f5f0e8" }}>
+    <div className="fixed inset-0" style={{ background: "#0a0a0a" }}>
       <video ref={videoRef} className="absolute invisible w-px h-px" />
       <canvas ref={canvasRef} className="absolute top-0 left-0 w-screen h-screen z-[5]" style={{ transform: "scaleX(-1)" }} />
 
       {/* Loading */}
       {loading && (
-        <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center gap-5" style={{ background: "#1a1a2e" }}>
+        <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center gap-5" style={{ background: "#0a0a0a" }}>
           <div className="flex gap-2.5">
             {[0, 1, 2].map((i) => (
               <div key={i} className="w-5 h-5 rounded-full" style={{
@@ -672,52 +774,102 @@ const DrawPage = () => {
               }} />
             ))}
           </div>
-          <p className="text-muted-foreground text-base font-semibold">Starting camera magic...</p>
+          <p className="text-white/70 text-base font-semibold">Starting camera magic...</p>
         </div>
       )}
 
-      {/* Color Picker - scrollable rainbow palette */}
-      <div className="fixed left-3 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 z-50 rounded-[40px] p-2.5 backdrop-blur-xl max-h-[85vh] overflow-y-auto scrollbar-hide" style={{ transform: "translateY(-50%) scaleX(-1)", background: "rgba(20,20,30,0.8)", border: "2px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 32px rgba(0,0,0,0.4)" }}>
+      {/* Color Picker */}
+      <div className="fixed left-3 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 z-50 rounded-[40px] p-2.5 backdrop-blur-xl max-h-[85vh] overflow-y-auto scrollbar-hide" style={{ transform: "translateY(-50%) scaleX(-1)", background: "rgba(10,10,10,0.85)", border: "1px solid rgba(255,255,255,0.08)", boxShadow: "0 8px 32px rgba(0,0,0,0.6)" }}>
         <div className="text-center text-lg mb-1" style={{ transform: "scaleX(-1)" }}>🎨</div>
-        {COLORS.map((c, i) => (
+        {activeColors.map((c) => (
           <button key={c} onClick={() => setCurrentColor(c)}
-            className="w-9 h-9 rounded-full border-[3px] cursor-pointer transition-all duration-200"
+            className="w-8 h-8 rounded-full border-2 cursor-pointer transition-all duration-200"
             style={{
               background: c,
               borderColor: currentColor === c ? "#fff" : "transparent",
-              transform: currentColor === c ? "scale(1.25)" : "scale(1)",
-              boxShadow: currentColor === c ? `0 0 20px ${c}, 0 0 8px #fff` : `0 2px 6px rgba(0,0,0,0.3)`,
-              animation: currentColor === c ? "pulseGlow 1.5s ease-in-out infinite" : "none",
+              transform: currentColor === c ? "scale(1.2)" : "scale(1)",
+              boxShadow: currentColor === c ? `0 0 12px ${c}` : "none",
             }}
           />
         ))}
-        {/* Rainbow cycle button */}
+      </div>
+
+      {/* Brush Mode Panel */}
+      <div className="fixed right-3 top-1/2 -translate-y-1/2 flex flex-col gap-2 z-50" style={{ transform: "translateY(-50%) scaleX(-1)" }}>
+        {/* Brush toggle */}
         <button
-          onClick={() => {
-            const idx = COLORS.indexOf(currentColor);
-            setCurrentColor(COLORS[(idx + 1) % COLORS.length]);
-          }}
-          className="w-9 h-9 rounded-full cursor-pointer transition-all duration-200 border-2 border-white/20 hover:scale-110 active:scale-90 mt-1"
-          style={{
-            background: "conic-gradient(#FF3B3B, #FFE66D, #00F5A0, #2BCBFF, #9B5DE5, #F04299, #FF3B3B)",
-            animation: "spin 4s linear infinite",
-          }}
-          title="Next color!"
-        />
+          onClick={() => setShowBrushPanel(!showBrushPanel)}
+          className="w-[50px] h-[50px] rounded-2xl flex items-center justify-center text-xl cursor-pointer transition-all hover:scale-110 active:scale-90"
+          style={{ background: "rgba(10,10,10,0.85)", backdropFilter: "blur(16px)", border: "1px solid rgba(255,255,255,0.1)" }}
+        >
+          🖌️
+        </button>
+
+        {showBrushPanel && (
+          <div className="flex flex-col gap-2 p-3 rounded-2xl" style={{ transform: "scaleX(-1)", background: "rgba(10,10,10,0.9)", border: "1px solid rgba(255,255,255,0.1)", backdropFilter: "blur(16px)" }}>
+            <p className="text-white/50 text-[10px] uppercase tracking-wider font-bold text-center">Brush</p>
+
+            {/* Brush modes */}
+            {([
+              { mode: "classic" as BrushMode, label: "Classic", icon: "✏️" },
+              { mode: "glitter" as BrushMode, label: "Glitter", icon: "✨" },
+              { mode: "rainbow" as BrushMode, label: "Rainbow", icon: "🌈" },
+            ]).map(({ mode, label, icon }) => (
+              <button key={mode} onClick={() => setBrushMode(mode)}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl cursor-pointer transition-all text-xs font-semibold"
+                style={{
+                  background: brushMode === mode ? "rgba(255,255,255,0.15)" : "transparent",
+                  color: brushMode === mode ? "#fff" : "rgba(255,255,255,0.5)",
+                  border: brushMode === mode ? "1px solid rgba(255,255,255,0.2)" : "1px solid transparent",
+                }}
+              >
+                <span className="text-base">{icon}</span>
+                <span>{label}</span>
+              </button>
+            ))}
+
+            {/* Stroke size */}
+            <p className="text-white/50 text-[10px] uppercase tracking-wider font-bold text-center mt-2">Size</p>
+            <div className="flex flex-col items-center gap-1">
+              <input
+                type="range" min="2" max="30" value={strokeWidth}
+                onChange={(e) => setStrokeWidth(Number(e.target.value))}
+                className="w-full accent-white"
+                style={{ height: "4px" }}
+              />
+              <div className="flex items-center justify-center">
+                <div className="rounded-full bg-white" style={{ width: strokeWidth, height: strokeWidth }} />
+              </div>
+            </div>
+
+            {/* Fill toggle */}
+            <p className="text-white/50 text-[10px] uppercase tracking-wider font-bold text-center mt-2">Fill</p>
+            <button onClick={() => setFillMode(!fillMode)}
+              className="flex items-center gap-2 px-3 py-2 rounded-xl cursor-pointer transition-all text-xs font-semibold"
+              style={{
+                background: fillMode ? "rgba(255,255,255,0.15)" : "transparent",
+                color: fillMode ? "#fff" : "rgba(255,255,255,0.5)",
+                border: fillMode ? "1px solid rgba(255,255,255,0.2)" : "1px solid transparent",
+              }}
+            >
+              <span className="text-base">🪣</span>
+              <span>Fill Shape</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Toolbar */}
       <div className="fixed top-4 right-4 flex gap-2 z-50" style={{ transform: "scaleX(-1)" }}>
         {[
-          { id: "theme", emoji: isDarkTheme ? "🌙" : "☀️", action: () => setIsDarkTheme(!isDarkTheme) },
           { id: "download", emoji: "💾", action: downloadDoodle },
           { id: "clear", emoji: "🗑️", action: clearAll },
           { id: "undo", emoji: "↩️", action: undo },
           { id: "home", emoji: "🏠", action: () => navigate("/") },
         ].map((btn) => (
           <button key={btn.id} onClick={btn.action}
-            className="w-[50px] h-[50px] rounded-[14px] flex items-center justify-center text-[22px] cursor-pointer transition-all hover:scale-110 active:scale-90"
-            style={{ background: "rgba(20,20,30,0.75)", backdropFilter: "blur(16px)", border: "1px solid rgba(255,255,255,0.08)" }}
+            className="w-[46px] h-[46px] rounded-2xl flex items-center justify-center text-xl cursor-pointer transition-all hover:scale-110 active:scale-90"
+            style={{ background: "rgba(10,10,10,0.8)", backdropFilter: "blur(16px)", border: "1px solid rgba(255,255,255,0.06)" }}
           >
             {btn.emoji}
           </button>
@@ -726,7 +878,7 @@ const DrawPage = () => {
 
       {/* Gesture Indicator */}
       <div className={`fixed bottom-5 left-1/2 z-50 font-body font-bold text-sm px-6 py-2.5 rounded-full pointer-events-none transition-opacity duration-300 ${gestureVisible ? "opacity-100" : "opacity-0"}`}
-        style={{ transform: "translateX(-50%) scaleX(-1)", background: "rgba(15,15,30,0.8)", backdropFilter: "blur(14px)", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.85)" }}
+        style={{ transform: "translateX(-50%) scaleX(-1)", background: "rgba(10,10,10,0.85)", backdropFilter: "blur(14px)", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.85)" }}
       >
         {gestureText}
       </div>
